@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Generated outputs
+out/
+out_audio/
+*.webm
+*.video
+
+# OS/editor
+.DS_Store
+*.swp
