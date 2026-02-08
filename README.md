@@ -2,7 +2,7 @@
 
 Build-time utilities for VNEF media.
 
-## build_videos.py
+## build_videos (Odin)
 Converts input videos to **VP9 WebM** and wraps them into a simple `.video` container:
 
 - 4 bytes magic: `VID0`
@@ -12,12 +12,25 @@ Converts input videos to **VP9 WebM** and wraps them into a simple `.video` cont
 
 ### Usage
 ```bash
-./build_videos.py <input-file-or-dir> <output-dir> --recursive
+# Run directly
+odin run build_videos.odin -- <input-file-or-dir> <output-dir> --recursive
+
+# Or build a binary
+odin build build_videos.odin -out:build_videos
+./build_videos <input-file-or-dir> <output-dir> --recursive
 ```
 
 Common options:
 - `--audio` keep audio (Opus)
 - `--keep-webm` keep intermediate `.webm`
 - `--force` overwrite outputs
+- `--ffmpeg /path/to/ffmpeg` use a specific ffmpeg binary
 
-Requires `ffmpeg` in PATH.
+Requires `ffmpeg` in PATH (or bundled under `third_party/ffmpeg`).
+
+## build_videos.py (legacy)
+Python fallback with the same behavior. Prefer the Odin tool.
+
+### Licensing (FFmpeg)
+If you bundle FFmpeg binaries, follow the checklist in `THIRD_PARTY.md`
+and `third_party/ffmpeg/README.md`.

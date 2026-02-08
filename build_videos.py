@@ -40,9 +40,15 @@ VIDEO_EXTS = {
 }
 
 
-def run_ffmpeg(src: Path, dst_webm: Path, args: argparse.Namespace) -> None:
+def run_ffmpeg(
+    src: Path,
+    dst_webm: Path,
+    args: argparse.Namespace,
+    ffmpeg_path: str,
+    ffmpeg_lib_dir: str | None,
+) -> None:
     cmd = [
-        "ffmpeg",
+        ffmpeg_path,
         "-y" if args.force else "-n",
         "-i",
         str(src),
@@ -67,7 +73,16 @@ def run_ffmpeg(src: Path, dst_webm: Path, args: argparse.Namespace) -> None:
 
     cmd += [str(dst_webm)]
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    env = os.environ.copy()
+    if ffmpeg_lib_dir:
+        if os.name == "nt":
+            env["PATH"] = ffmpeg_lib_dir + os.pathsep + env.get("PATH", "")
+        elif sys.platform == "darwin":
+            env["DYLD_LIBRARY_PATH"] = ffmpeg_lib_dir + os.pathsep + env.get("DYLD_LIBRARY_PATH", "")
+        else:
+            env["LD_LIBRARY_PATH"] = ffmpeg_lib_dir + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed for {src}\n{proc.stdout}")
 
@@ -96,9 +111,22 @@ def iter_inputs(src: Path, recursive: bool) -> list[Path]:
     return sorted(files)
 
 
-def ensure_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None:
-        raise FileNotFoundError("ffmpeg not found in PATH")
+def resolve_ffmpeg(args: argparse.Namespace) -> tuple[str, str | None]:
+    if args.ffmpeg:
+        return args.ffmpeg, None
+
+    tool_root = Path(__file__).resolve().parent
+    bundled = tool_root / "third_party" / "ffmpeg" / "bin" / "ffmpeg"
+    if os.name == "nt":
+        bundled = bundled.with_suffix(".exe")
+    if bundled.exists():
+        lib_dir = (tool_root / "third_party" / "ffmpeg" / "lib")
+        return str(bundled), (str(lib_dir) if lib_dir.exists() else None)
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise FileNotFoundError("ffmpeg not found in PATH (or use --ffmpeg)")
+    return ffmpeg, None
 
 
 def main() -> int:
@@ -108,6 +136,7 @@ def main() -> int:
     parser.add_argument("--recursive", action="store_true", help="Scan input directory recursively")
     parser.add_argument("--keep-webm", action="store_true", help="Keep intermediate .webm files")
     parser.add_argument("--force", action="store_true", help="Overwrite outputs if they exist")
+    parser.add_argument("--ffmpeg", type=str, default="", help="Path to ffmpeg binary (optional)")
 
     # VP9 settings
     parser.add_argument("--crf", type=int, default=30, help="VP9 quality (lower=better, 15-40 typical)")
@@ -120,7 +149,11 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    ensure_ffmpeg()
+    ffmpeg_path, ffmpeg_lib_dir = resolve_ffmpeg(args)
+    print(f"Using ffmpeg: {ffmpeg_path}")
+    if ffmpeg_lib_dir:
+        print(f"Using ffmpeg libs: {ffmpeg_lib_dir}")
+    print("Note: If you bundle ffmpeg, see THIRD_PARTY.md for licensing requirements.")
 
     inputs = iter_inputs(args.src, args.recursive)
     if not inputs:
@@ -135,7 +168,7 @@ def main() -> int:
         webm_path = args.out / f"{stem}.webm"
         video_path = args.out / f"{stem}.video"
 
-        run_ffmpeg(src, webm_path, args)
+        run_ffmpeg(src, webm_path, args, ffmpeg_path, ffmpeg_lib_dir)
         wrap_webm_to_video(webm_path, video_path, args.force)
 
         if not args.keep_webm:

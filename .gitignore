@@ -7,6 +7,14 @@ out/
 out_audio/
 *.webm
 *.video
+third_party/ffmpeg/bin/
+third_party/ffmpeg/lib/
+third_party/ffmpeg/source/
+third_party/ffmpeg/build/
+
+# Odin build outputs
+build_videos
+build_videos.exe
 
 # OS/editor
 .DS_Store
