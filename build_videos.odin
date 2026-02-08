@@ -1,7 +1,6 @@
 package main
 
 import "core:fmt"
-import "core:io"
 import "core:strconv"
 import "core:strings"
 import "core:path/filepath"
@@ -23,12 +22,13 @@ VIDEO_EXTS :: []string{
     ".flv",
 }
 
-type Options struct {
+Options :: struct {
     recursive: bool,
     keep_webm: bool,
     force: bool,
     audio: bool,
     audio_bitrate: int,
+    audio_out: string,
     crf: int,
     deadline: string,
     cpu_used: int,
@@ -43,7 +43,8 @@ print_usage :: proc() {
     fmt.println("  --recursive          Scan input directory recursively")
     fmt.println("  --keep-webm           Keep intermediate .webm files")
     fmt.println("  --force               Overwrite outputs if they exist")
-    fmt.println("  --audio               Keep audio (Opus)")
+    fmt.println("  --audio               Extract audio to .ogg (Opus)")
+    fmt.println("  --audio-out <dir>      Output directory for extracted audio (.ogg)")
     fmt.println("  --audio-bitrate <k>   Opus bitrate in kbps (default 128)")
     fmt.println("  --crf <n>             VP9 quality (default 30)")
     fmt.println("  --deadline <mode>     realtime|good|best (default good)")
@@ -60,76 +61,71 @@ is_video_ext :: proc(ext: string) -> bool {
     return false
 }
 
+@(private)
+collect_dir :: proc(path: string, recursive: bool, inputs: ^[dynamic]string) {
+    fis, err := os2.read_all_directory_by_path(path, context.temp_allocator)
+    if err != nil {
+        fmt.eprintln("Failed to read dir:", path)
+        return
+    }
+    defer os2.file_info_slice_delete(fis, context.temp_allocator)
+
+    for fi in fis {
+        if fi.type == .Directory {
+            if recursive {
+                collect_dir(fi.fullpath, recursive, inputs)
+            }
+            continue
+        }
+        if fi.type != .Regular {
+            continue
+        }
+        ext := strings.to_lower(filepath.ext(fi.fullpath))
+        if is_video_ext(ext) {
+            append(inputs, strings.clone(fi.fullpath))
+        }
+        delete(ext)
+    }
+}
+
 iter_inputs :: proc(src: string, recursive: bool) -> []string {
     inputs: [dynamic]string
 
     if os2.is_file(src) {
         append(&inputs, strings.clone(src))
-        return inputs
+        return inputs[:]
     }
     if !os2.is_dir(src) {
         fmt.eprintln("Input path not found:", src)
-        return inputs
+        return inputs[:]
     }
 
-    if recursive {
-        walk_proc := proc(info: os2.File_Info, in_err: os2.Error, user_data: rawptr) -> (err: os2.Error, skip_dir: bool) {
-            if in_err != nil {
-                return in_err, false
-            }
-            if info.type == .Directory {
-                return nil, false
-            }
-            ext := strings.to_lower(filepath.ext(info.fullpath))
-            defer delete(ext)
-            if is_video_ext(ext) {
-                append(&inputs, strings.clone(info.fullpath))
-            }
-            return nil, false
-        }
-
-        _ = filepath.walk(src, walk_proc, nil)
-        return inputs
-    }
-
-    fis, err := os2.read_dir(src, context.temp_allocator)
-    if err != nil {
-        fmt.eprintln("Failed to read dir:", src)
-        return inputs
-    }
-    defer os2.file_info_slice_delete(fis, context.temp_allocator)
-
-    for fi in fis {
-        if fi.type != .Regular {
-            continue
-        }
-        ext := strings.to_lower(filepath.ext(fi.fullpath))
-        defer delete(ext)
-        if is_video_ext(ext) {
-            append(&inputs, strings.clone(fi.fullpath))
-        }
-    }
-
-    return inputs
+    collect_dir(src, recursive, &inputs)
+    return inputs[:]
 }
 
 resolve_ffmpeg :: proc(ffmpeg_arg: string) -> (path: string, lib_dir: string) {
     if ffmpeg_arg != "" {
         // If user supplies an explicit ffmpeg path, try sibling ../lib
-        lib_guess := filepath.join(filepath.dir(ffmpeg_arg), "..", "lib")
+        lib_guess, _ := filepath.join([]string{filepath.dir(ffmpeg_arg), "..", "lib"})
         if os2.is_dir(lib_guess) {
             return ffmpeg_arg, lib_guess
         }
         return ffmpeg_arg, ""
     }
 
-    tool_root := os2.get_current_directory(context.temp_allocator)
-    bundled := filepath.join(tool_root, "third_party", "ffmpeg", "bin", "ffmpeg")
+    tool_root, err := os2.get_working_directory(context.temp_allocator)
+    if err == nil {
+        defer delete(tool_root)
+    } else {
+        tool_root = "."
+    }
+    bundled, _ := filepath.join([]string{tool_root, "third_party", "ffmpeg", "bin", "ffmpeg"})
     when ODIN_OS == .Windows {
-        bundled = bundled + ".exe"
+        bundled = strings.concatenate({bundled, ".exe"})
     }
     if os2.is_file(bundled) {
-        lib_dir := filepath.join(tool_root, "third_party", "ffmpeg", "lib")
+        lib_dir, _ := filepath.join([]string{tool_root, "third_party", "ffmpeg", "lib"})
         if os2.is_dir(lib_dir) {
             return bundled, lib_dir
         }
@@ -147,9 +143,9 @@ resolve_ffmpeg :: proc(ffmpeg_arg: string) -> (path: string, lib_dir: string) {
     parts := strings.split(path_env, sep)
     defer delete(parts)
     for p in parts {
-        candidate := filepath.join(p, "ffmpeg")
+        candidate, _ := filepath.join([]string{p, "ffmpeg"})
         when ODIN_OS == .Windows {
-            candidate = candidate + ".exe"
+            candidate = strings.concatenate({candidate, ".exe"})
         }
         if os2.is_file(candidate) {
             return candidate, ""
@@ -189,6 +185,9 @@ run_ffmpeg :: proc(src, dst_webm: string, opts: Options, ffmpeg_path: string, li
 
     cmd: [dynamic]string
     append(&cmd, ffmpeg_path)
+    append(&cmd, "-hide_banner")
+    append(&cmd, "-loglevel")
+    append(&cmd, "error")
     if opts.force {
         append(&cmd, "-y")
     } else {
@@ -201,39 +200,40 @@ run_ffmpeg :: proc(src, dst_webm: string, opts: Options, ffmpeg_path: string, li
     append(&cmd, "-b:v")
     append(&cmd, "0")
     append(&cmd, "-crf")
-    append(&cmd, strconv.itoa(opts.crf))
+    crf_str := int_to_string(opts.crf)
+    append(&cmd, crf_str)
     append(&cmd, "-row-mt")
     append(&cmd, "1")
     append(&cmd, "-deadline")
     append(&cmd, opts.deadline)
     append(&cmd, "-cpu-used")
-    append(&cmd, strconv.itoa(opts.cpu_used))
+    cpu_str := int_to_string(opts.cpu_used)
+    append(&cmd, cpu_str)
 
-    if opts.audio {
-        append(&cmd, "-c:a")
-        append(&cmd, "libopus")
-        append(&cmd, "-b:a")
-        append(&cmd, strconv.itoa(opts.audio_bitrate) + "k")
-    } else {
-        append(&cmd, "-an")
-    }
+    // Always keep the .video output silent. Audio is extracted separately.
+    append(&cmd, "-an")
 
     append(&cmd, dst_webm)
 
-    desc := os2.Process_Desc{command = cmd}
-    state, stdout, stderr, err := os2.process_exec(desc, context.temp_allocator)
-    defer delete(stdout)
-    defer delete(stderr)
-    defer delete(cmd)
+    desc := os2.Process_Desc{command = cmd[:]}
+    fmt.println("Running ffmpeg:", src)
+    p, err := os2.process_start(desc)
 
-    if err != nil || state.exit_code != 0 {
-        if len(stdout) > 0 {
-            fmt.eprintln(string(stdout))
-        }
-        if len(stderr) > 0 {
-            fmt.eprintln(string(stderr))
-        }
-        fmt.eprintln("ffmpeg failed for:", src)
+    if err != nil {
+        fmt.eprintln("Failed to start ffmpeg for:", src, err)
+        return false
+    }
+    defer {
+        _ = os2.process_close(p)
+    }
+
+    state, wait_err := os2.process_wait(p)
+    fmt.println("ffmpeg finished:", src, "exit", state.exit_code)
+    delete(cmd)
+    delete(crf_str)
+    delete(cpu_str)
+    if wait_err != nil || state.exit_code != 0 {
+        fmt.eprintln("ffmpeg failed for:", src, "exit:", state.exit_code)
         return false
     }
 
@@ -265,20 +265,22 @@ wrap_webm_to_video :: proc(src_webm, dst_video: string, force: bool) -> bool {
     }
 
     info, err := os2.stat(src_webm, context.temp_allocator)
-    defer os2.file_info_delete(info, context.temp_allocator)
     if err != nil {
         fmt.eprintln("Failed to stat:", src_webm)
         return false
     }
+    defer os2.file_info_delete(info, context.temp_allocator)
 
-    fin, err := os2.open(src_webm, {.Read})
+    fin: ^os2.File
+    fin, err = os2.open(src_webm, {.Read})
     if err != nil || fin == nil {
         fmt.eprintln("Failed to open:", src_webm)
         return false
     }
     defer os2.close(fin)
 
-    fout, err := os2.open(dst_video, {.Write, .Create, .Trunc}, os2.Permissions_Default_File)
+    fout: ^os2.File
+    fout, err = os2.open(dst_video, {.Write, .Create, .Trunc}, os2.Permissions_Default_File)
     if err != nil || fout == nil {
         fmt.eprintln("Failed to open:", dst_video)
         return false
@@ -296,10 +298,11 @@ wrap_webm_to_video :: proc(src_webm, dst_video: string, force: bool) -> bool {
         return false
     }
 
-    buf: [1024*1024]u8
+    buf := make([]u8, 256*1024)
+    defer delete(buf)
     for {
         n, rerr := os2.read(fin, buf[:])
-        if rerr == io.EOF {
+        if rerr == .EOF {
             break
         }
         if rerr != nil {
@@ -319,6 +322,61 @@ wrap_webm_to_video :: proc(src_webm, dst_video: string, force: bool) -> bool {
     return true
 }
 
+run_ffmpeg_audio :: proc(src, dst_audio: string, opts: Options, ffmpeg_path: string, lib_dir: string) -> bool {
+    set_ffmpeg_lib_env(lib_dir)
+
+    cmd: [dynamic]string
+    append(&cmd, ffmpeg_path)
+    append(&cmd, "-hide_banner")
+    append(&cmd, "-loglevel")
+    append(&cmd, "error")
+    if opts.force {
+        append(&cmd, "-y")
+    } else {
+        append(&cmd, "-n")
+    }
+    append(&cmd, "-i")
+    append(&cmd, src)
+    append(&cmd, "-vn")
+    append(&cmd, "-c:a")
+    append(&cmd, "libopus")
+    append(&cmd, "-b:a")
+    br_str := int_to_string(opts.audio_bitrate)
+    br_k := strings.concatenate({br_str, "k"})
+    append(&cmd, br_k)
+    append(&cmd, dst_audio)
+
+    desc := os2.Process_Desc{command = cmd[:]}
+    p, err := os2.process_start(desc)
+    if err != nil {
+        delete(cmd)
+        delete(br_k)
+        delete(br_str)
+        fmt.eprintln("Failed to start ffmpeg (audio) for:", src, err)
+        return false
+    }
+    defer {
+        _ = os2.process_close(p)
+    }
+
+    state, wait_err := os2.process_wait(p)
+    delete(cmd)
+    delete(br_k)
+    delete(br_str)
+
+    if wait_err != nil || state.exit_code != 0 {
+        fmt.eprintln("ffmpeg audio failed for:", src, "exit:", state.exit_code)
+        return false
+    }
+    return true
+}
+
+int_to_string :: proc(v: int) -> string {
+    buf: [64]u8
+    s := strconv.write_int(buf[:], i64(v), 10)
+    return strings.clone(s)
+}
+
 main :: proc() {
     args := os2.args
 
@@ -328,6 +386,7 @@ main :: proc() {
         force = false,
         audio = false,
         audio_bitrate = 128,
+        audio_out = "",
         crf = 30,
         deadline = "good",
         cpu_used = 4,
@@ -350,6 +409,10 @@ main :: proc() {
                 if i+1 >= len(args) { print_usage(); return }
                 i += 1
                 if v, ok := strconv.parse_int(args[i]); ok { opts.audio_bitrate = v }
+            case "--audio-out":
+                if i+1 >= len(args) { print_usage(); return }
+                i += 1
+                opts.audio_out = args[i]
             case "--crf":
                 if i+1 >= len(args) { print_usage(); return }
                 i += 1
@@ -366,6 +429,9 @@ main :: proc() {
                 if i+1 >= len(args) { print_usage(); return }
                 i += 1
                 opts.ffmpeg = args[i]
+            case "--help", "-h":
+                print_usage()
+                return
             case:
                 fmt.eprintln("Unknown option:", a)
                 print_usage()
@@ -393,8 +459,8 @@ main :: proc() {
     }
 
     err := os2.make_directory_all(out)
-    if err != nil {
-        fmt.eprintln("Failed to create output dir:", out)
+    if err != nil && err != .Exist {
+        fmt.eprintln("Failed to create output dir:", out, err)
         return
     }
 
@@ -414,20 +480,68 @@ main :: proc() {
         return
     }
 
+    if opts.audio {
+        if opts.audio_out == "" {
+    base_dir := filepath.dir(out)
+    opts.audio_out, _ = filepath.join([]string{base_dir, "video_audio"})
+        }
+        err = os2.make_directory_all(opts.audio_out)
+        if err != nil && err != .Exist {
+            fmt.eprintln("Failed to create audio output dir:", opts.audio_out, err)
+            return
+        }
+    }
+
     for input in inputs {
         stem := filepath.stem(input)
-        webm_path := filepath.join(out, stem + ".webm")
-        video_path := filepath.join(out, stem + ".video")
+        webm_name := strings.concatenate({stem, ".webm"})
+        video_name := strings.concatenate({stem, ".video"})
+        webm_path, _ := filepath.join([]string{out, webm_name})
+        video_path, _ := filepath.join([]string{out, video_name})
+        audio_name := strings.concatenate({stem, ".ogg"})
+        audio_path := ""
+        if opts.audio {
+            audio_path, _ = filepath.join([]string{opts.audio_out, audio_name})
+        }
 
         if !run_ffmpeg(input, webm_path, opts, ffmpeg_path, lib_dir) {
+            delete(webm_name)
+            delete(video_name)
+            delete(webm_path)
+            delete(video_path)
+            delete(audio_name)
+            if audio_path != "" do delete(audio_path)
             return
         }
         if !wrap_webm_to_video(webm_path, video_path, opts.force) {
+            delete(webm_name)
+            delete(video_name)
+            delete(webm_path)
+            delete(video_path)
+            delete(audio_name)
+            if audio_path != "" do delete(audio_path)
             return
+        }
+        if opts.audio {
+            if !run_ffmpeg_audio(input, audio_path, opts, ffmpeg_path, lib_dir) {
+                delete(webm_name)
+                delete(video_name)
+                delete(webm_path)
+                delete(video_path)
+                delete(audio_name)
+                delete(audio_path)
+                return
+            }
         }
         if !opts.keep_webm {
             _ = os2.remove(webm_path)
         }
         fmt.println("Built", video_path)
+        delete(webm_name)
+        delete(video_name)
+        delete(webm_path)
+        delete(video_path)
+        delete(audio_name)
+        if audio_path != "" do delete(audio_path)
     }
 }

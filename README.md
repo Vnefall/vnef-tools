@@ -13,7 +13,7 @@ Converts input videos to **VP9 WebM** and wraps them into a simple `.video` cont
 ### Usage
 ```bash
 # Run directly
-odin run build_videos.odin -- <input-file-or-dir> <output-dir> --recursive
+odin run build_videos.odin -file -- <input-file-or-dir> <output-dir> --recursive
 
 # Or build a binary
 odin build build_videos.odin -out:build_videos
@@ -21,12 +21,18 @@ odin build build_videos.odin -out:build_videos
 ```
 
 Common options:
-- `--audio` keep audio (Opus)
+- `--audio` extract audio to `.ogg` (Opus)
+- `--audio-out <dir>` output directory for extracted audio
 - `--keep-webm` keep intermediate `.webm`
 - `--force` overwrite outputs
 - `--ffmpeg /path/to/ffmpeg` use a specific ffmpeg binary
 
 Requires `ffmpeg` in PATH (or bundled under `third_party/ffmpeg`).
+
+### Suggested layout (Vnefall)
+- Source videos: `demo/assets/videos_src/` (mp4/webm)
+- Generated videos: `demo/runtime/videos/` (`.video`)
+- Extracted audio: `demo/runtime/video_audio/` (`.ogg`)
 
 ## build_videos.py (legacy)
 Python fallback with the same behavior. Prefer the Odin tool.
